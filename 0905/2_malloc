@@ -8,37 +8,45 @@ using namespace std;
 
 int main(){
     int x = 0, y = 0, z = 0, m = 0, n = 0;
-    string fn, ln;
+    string name;
     map <int, string> students;
+    //輸入人數
     cout << "請輸入學生人數";
     cin >> x;
+    //輸入姓名並放入map暫存
     cout << "請輸入學生姓名";
+    cin.ignore();
     for(int i = 0;i < x;i++){
-        cin >> fn >> ln;
-        if(ln.back() == ',')
-            ln.pop_back();
-        int flen = fn.size();
-        if(flen > z)
-            z = flen;
-        int len = flen + ln.size();
+        getline(cin, name);
+        //找出姓名最長長度
+        int len = name.size();
         if(len > y)
             y = len;
-        students[i] = (fn + " " + ln);
+        students[i] = name;
     }
+    //建立malloc二維動態陣列
     char **names = (char**) malloc(sizeof(char *) * x);
     for(int i = 0;i < x;i++){
         names[i] = (char*) malloc(sizeof(char) * (y+1));
         string s = students[i];
+        
         strcpy(names[i], s.c_str());
     }
+    //
     cout << "輸出結果:\n";
+    for(int i = 0;i < x;i++){
+        char *space = find(names[i], names[i] + strlen(names[i]), ' ');
+        if((space - names[i]) > z)
+            z = space - names[i];
+    }
+    //
     for(int i = 0;i < x;i++){
         char *pos = std::find(names[i], names[i] + strlen(names[i]), ' ');
         for(int j = 0;j < (z - (pos - names[i]));j++)
             cout << " ";
         cout << names[i] << endl;
     }
-    
+    //
     for(int i = 0;i < x;i++){
         free(names[i]);
     }
