@@ -1,0 +1,24 @@
+class Solution {
+public:
+    int kthSmallest(vector<vector<int>>& matrix, int k) {
+        int n = matrix.size();
+        int max = matrix[n-1][n-1], min = matrix[0][0];
+        int mid = 0;
+        while(min < max){
+            mid = min + (max - min)/2;
+            int cnt = 0;
+            for(int x = 0, y = (n-1);x < n;x++, y = n-1){
+                while(y >= 0 && matrix[x][y] > mid){
+                    y--;
+                }
+                cnt += y + 1;
+            }
+            if(cnt < k)
+                min = mid + 1;
+            else
+                max = mid;
+            //cout << mid << " " << cnt << endl;
+        }
+        return min;
+    }
+};
