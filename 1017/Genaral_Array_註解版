@@ -1,0 +1,114 @@
+#include <iostream>
+using namespace std;
+
+class CppArray{
+private:
+    int size;//陣列大小
+    float* data;
+public:
+    CppArray(int size = 8, float initvalue = 0.0f) :size(size){// 可指定大小與初始值的建構子
+        if(size > 0){
+            data = new float[size];//配置記憶體
+            for(int i = 0;i < size;i++){
+                data[i] = initvalue;//初始化每個值
+            }
+        }
+        else{
+            data = nullptr;//如果大小<=0,不配置空間
+        }
+    }
+    CppArray(const CppArray& cp2) :size(cp2.size){//用來複製的建構子
+        if(size > 0){
+            data = new float[size];//一樣先配置記憶體
+            for(int i = 0;i < size;i++)
+                data[i] = cp2.data[i];//一個一個複製過去
+        }else
+            data = nullptr;
+    }
+    CppArray& operator=(const CppArray& cp2){//自定義指定運算子
+        if(this == &cp2)
+            return *this;//如果自己指向自己，就跳過
+        delete[] data;//刪除原有記憶體
+        size = cp2.size;//載入新的大小
+        if(size > 0){
+            data = new float[size];//重新配置記憶體
+            for(int i = 0;i < size;i++)
+                data[i] = cp2.data[i];//複製原有陣列內容
+        }else
+            data = nullptr;
+        return *this;//回傳自己位置
+    }
+    ~CppArray(){//不再使用時自動執行解構子
+        delete[] data;//釋放記憶體
+    }
+    float& operator[](int i){//自定義中括號
+        if(i < 0 || i >= size)
+            throw out_of_range("Index out of range!");//如果超出range就throw錯誤
+        return data[i-1];//回傳值，因為要讓使用者直觀知道第幾個(從1開始而不是0)
+    }
+    int GetSize(){//取得陣列大小
+        return size;
+    }
+    friend istream& operator>>(istream& cin, CppArray& arr);//宣告成friend函式，可以class外操作private變數
+    friend ostream& operator<<(ostream& cout, CppArray& arr);
+};
+
+istream& operator>>(istream& cin, CppArray& arr){//自定義輸入運算子
+    for(int i = 0;i < arr.size;i++)
+        cin >> arr.data[i];
+    return cin;//讓mian可以一次往陣列裡輸入所有值
+}
+ostream& operator<<(ostream& cout, CppArray& arr){//自定義輸出運算子
+    cout << "{";
+    for(int i = 0;i < arr.size;i++){
+        cout << arr.data[i];
+        if(i != arr.size -1)
+            cout << ", ";//每個值中間用逗號隔開
+    }
+    cout << "}";
+    return cout;//讓mian可以用一次印出陣列的所有值
+}
+
+int main(){
+    
+    int n, i;
+    float v, f;
+    cout << "請輸入陣列大小和預設值：" << endl;
+    cin >> n >> v;
+    CppArray arr1(n, v);//建立陣列1，大小為n初始值為v
+    cout << "請輸入" << n << "個整數：" << endl;
+    cin >> arr1;//使用自訂義的>>輸入值進陣列1
+    cout << "將複製陣列一至陣列二" << endl;
+    CppArray arr2 = arr1;//呼叫複製建構子，並將陣列1複製到陣列2
+    cout << "請依序輸入陣列二第幾個數字要改成多少：" << endl;
+    cin >> i >> f;
+    try{
+        arr2[i] = f;//修改陣列2中的第i個值
+    }catch(const out_of_range& e){//如果catch到報錯，輸出報錯訊息
+        cout << "無法執行，原因：" << e.what() << endl;
+    }
+    cout << "將複製陣列二至陣列三" << endl;
+    CppArray arr3 = arr2;//用相同的方法將陣列2複製到陣列3
+    cout << "請依序輸入陣列三第幾個數字要改成多少：" << endl;
+    cin >> i >> f;
+    try{
+        arr3[i] = f;//與上方修改方法相同
+    }catch(const out_of_range& e){
+        cout << "無法執行，原因：" << e.what() << endl;
+    }
+    cout << "陣列一為：" << arr1 << ", 陣列大小為：" << arr1.GetSize() << endl;//輸出每個陣列及陣列大小
+    cout << "陣列二為：" << arr2 << ", 陣列大小為：" << arr2.GetSize() << endl;
+    cout << "陣列三為：" << arr3 << ", 陣列大小為：" << arr3.GetSize() << endl;
+    
+    /*
+    CppArray a1(3,1);//建立大小為3初始值為1的陣列
+    cin >> a1;//輸入新的指定值
+    cout << a1;//輸出陣列
+    //CppArray a2 = a1;
+    //cout << a2;
+    CppArray a3;
+    a3 = a1;
+    cout << a3;
+    */
+    return 0;
+}
