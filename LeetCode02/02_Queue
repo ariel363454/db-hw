@@ -1,0 +1,32 @@
+class MyQueue {
+private:
+    queue<int> que;
+public:
+    MyQueue() {
+        
+    }
+    
+    void push(int x) {
+        que.push(x);
+    }
+    
+    int pop() {
+        if(!que.empty()){
+            int q = que.front();
+            que.pop();
+            return q;
+        }else
+            return -1;
+    }
+    
+    int peek() {
+        if(!que.empty())
+            return que.front();
+        else
+            return -1;
+    }
+    
+    bool empty() {
+        return que.empty();
+    }
+};
