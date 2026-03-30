@@ -1,0 +1,62 @@
+#include <iostream>
+#include<vector>
+#include<fstream>
+#include<cstdlib>
+#include<ctime>
+#include<chrono>
+using namespace std;
+using namespace std::chrono;
+
+void sort(vector<int>& arr, int left, int mid, int right){
+    vector<int> L, R;
+    for(int i = 0;i < mid - left + 1;i++)
+        L.push_back(arr[left + i]);
+    for(int i = 0;i < right - mid;i++)
+        R.push_back(arr[mid + 1 + i]);
+    int i = 0, j = 0, k = left;
+    for(;i < L.size() && j < R.size();k++){
+        if(L[i] <= R[j]){
+            arr[k] = L[i];
+            i++;
+        }else{
+            arr[k] = R[j];
+            j++;
+        }
+    }
+    for(;i < L.size();i++, k++)
+        arr[k] = L[i];
+    for(;j < R.size();j++, k++)
+        arr[k] = R[j];
+}
+void MergeSort(vector<int>& arr, int left, int right){
+    if(left < right){
+        int mid = left + (right - left)/2;
+        MergeSort(arr, left, mid);
+        MergeSort(arr, mid+1, right);
+        sort(arr, left, mid, right);
+    }else
+        return;
+}
+
+int main()
+{
+    ofstream fout("sort.csv");
+    srand(time(NULL));
+    
+    for(int n = 10;n <= 100000;n *= 10){
+        vector<int> arr;
+        for(int i = 0;i < n;i++)
+            arr.push_back(rand() % 50000 + 1);
+            
+        auto start = high_resolution_clock::now();
+        MergeSort(arr, 0, arr.size()-1);
+        auto end = high_resolution_clock::now();
+        duration<double, milli> elapsed = end - start;
+        fout << elapsed.count() << endl;
+        cout << n << endl;
+    }
+    fout.close();
+    cout << "done" << endl;
+
+    return 0;
+}
