@@ -1,0 +1,52 @@
+#include <iostream>
+#include<vector>
+#include<fstream>
+#include<cstdlib>
+#include<ctime>
+#include<chrono>
+using namespace std;
+using namespace std::chrono;
+
+void Maxheap(vector<int>& arr, int n, int i){
+    int largest = i;
+    int l = 2 * i + 1, r = 2 * i + 2;
+    if(l < n && arr[l] > arr[largest])
+        largest = l;
+    if(r < n && arr[r] > arr[largest])
+        largest = r;
+    if(largest != i){
+        swap(arr[i], arr[largest]);
+        Maxheap(arr, n, largest);
+    }
+}
+
+void HeapSort(vector<int>& arr){
+    int n = arr.size();
+    for(int i = n / 2 - 1;i >= 0;i--)
+        Maxheap(arr, n, i);
+    for(int i = n - 1;i > 0;i--){
+        swap(arr[0], arr[i]);
+        Maxheap(arr, i, 0);
+    }
+}
+
+int main(){
+    ofstream fout("sort.csv");
+    srand(time(NULL));
+    
+    for(int n = 10;n <= 100000;n *= 10){
+        vector<int> arr;
+        for(int i = 0;i < n;i++)
+            arr.push_back(rand() % 50000 + 1);
+            
+        auto start = high_resolution_clock::now();
+        HeapSort(arr);
+        auto end = high_resolution_clock::now();
+        duration<double> elapsed = end - start;
+        fout << elapsed.count() << endl;
+        cout << n << endl;
+    }
+    fout.close();
+    cout << "done" << endl;
+    return 0;
+}
