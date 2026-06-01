@@ -9,31 +9,51 @@ import { createPortal } from 'react-dom';
 const parseWKTToLatLng = (wktStr) => {
   if (!wktStr || typeof wktStr !== 'string') return [];
   
-  // 🚀 1. 抓出所有數位（包含負號與小數點）
+  const text = wktStr.toUpperCase().trim();
   const numberPattern = /-?\d+\.\d+|-?\d+/g;
-  const matches = wktStr.match(numberPattern);
-  
+
+  // 🚀 劇本 A：如果是複雜的多重線段 MULTILINESTRING
+  if (text.startsWith('MULTILINESTRING')) {
+    // 利用括號把每一條獨立的線段切開
+    const lineStrings = text.split(/\),\s*\(/);
+    const multiCoords = [];
+
+    lineStrings.forEach(line => {
+      const matches = line.match(numberPattern);
+      if (!matches || matches.length < 2) return;
+      
+      const singleLineCoords = [];
+      for (let i = 0; i < matches.length; i += 2) {
+        const val1 = parseFloat(matches[i]);
+        const val2 = parseFloat(matches[i + 1]);
+        // 智能盲測對調 [Lat, Lng]
+        if (val2 >= 20 && val2 <= 26 && val1 >= 119 && val1 <= 123) {
+          singleLineCoords.push([val2, val1]);
+        } else if (val1 >= 20 && val1 <= 26 && val2 >= 119 && val2 <= 123) {
+          singleLineCoords.push([val1, val2]);
+        }
+      }
+      if (singleLineCoords.length >= 2) {
+        multiCoords.push(singleLineCoords);
+      }
+    });
+    return multiCoords; // 吐出三維/二維陣列，Leaflet 畫 MultiPolyline 專用
+  }
+
+  // 🚀 劇本 B：一般的 LINESTRING (維持你原本的優秀邏輯)
+  const matches = text.match(numberPattern);
   if (!matches || matches.length < 2) return [];
   
   const coords = [];
-  
-  // 🚀 2. 兩兩一組抽取座標對，進行智能盲測與物理對調
   for (let i = 0; i < matches.length; i += 2) {
     const val1 = parseFloat(matches[i]);
     const val2 = parseFloat(matches[i + 1]);
-    
-    if (isNaN(val1) || isNaN(val2)) continue;
-
-    // 🎯 情況 A：第一個是經度 (121)，第二個是緯度 (25) -> 標準 WKT 流
     if (val2 >= 20 && val2 <= 26 && val1 >= 119 && val1 <= 123) {
-      coords.push([val2, val1]); // Leaflet 要的是 [lat, lng]，所以放 [val2, val1]
-    }
-    // 🎯 情況 B：第一個是緯度 (25)，第二個是經度 (121) -> 髒資料顛倒流
-    else if (val1 >= 20 && val1 <= 26 && val2 >= 119 && val2 <= 123) {
-      coords.push([val1, val2]); // 自動對調，精準導正為 [lat, lng]
+      coords.push([val2, val1]);
+    } else if (val1 >= 20 && val1 <= 26 && val2 >= 119 && val2 <= 123) {
+      coords.push([val1, val2]);
     }
   }
-  
   return coords;
 };
 
@@ -66,6 +86,72 @@ function App() {
   const [userLocation, setUserLocation] = useState(null);
   const [map, setMap] = useState(null);
   const [activeFeeItem, setActiveFeeItem] = useState(null);
+  const [selectedDistrict, setSelectedDistrict] = useState('');
+  const [searchKeyword, setSearchKeyword] = useState('');
+  const [lastUpdateTime, setLastUpdateTime] = useState('');
+  const [timeMode, setTimeMode] = useState('now');
+  const [targetTime, setTargetTime] = useState(() => {
+    const now = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:00`;
+  });
+  const handleSearch = async (district, keyword) => {
+      if (!keyword.trim()) {
+          alert("請輸入要搜尋的地標、路名或地址！");
+          return;
+      }
+      let fullAddress = '';
+      if (keyword.includes('區') || keyword.includes('市') || keyword.includes('台北')) {
+          fullAddress = keyword.startsWith('台北') ? keyword : `台北市${keyword}`;
+      }
+      else {
+          fullAddress = `台北市${district}${keyword}`;
+          
+          if (keyword === '台北101' || keyword === '台北車站' || keyword.length < 5) {
+              fullAddress = `台北市${keyword}`;
+          }
+      }
+
+      console.log(`📡 [智能地址對齊] 最終發送給 OSM 的反查字串為: "${fullAddress}"`);
+      
+      try {
+          // 1. 第三方地理反查
+          const response = await fetch(
+              `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(fullAddress)}&format=json&limit=1`
+          );
+          const data = await response.json();
+          
+          if (data && data.length > 0) {
+              const newLat = parseFloat(data[0].lat);
+              const newLng = parseFloat(data[0].lon);
+              
+              console.log(`成功反查中心點：緯度 ${newLat}, 經度 ${newLng}`);
+
+              // 🚀 同步設定中心點，讓地圖上的 500m 藍色虛線圈圈自動畫在 101 周圍
+              setUserLocation({ lat: newLat, lng: newLng });
+              setIsRadiusMode(true);
+
+              // 2. 叫 Leaflet 地圖直接飛過去！
+              if (map) {
+                  map.flyTo([newLat, newLng], 16);
+              }
+
+              // 3. 帶著新中心點，去敲你們昨天修好的 Django 後端 API
+              const apiURL = `/api/parking_bounds/?min_lat=${newLat-0.01}&max_lat=${newLat+0.01}&min_lng=${newLng-0.01}&max_lng=${newLng+0.01}&user_lat=${newLat}&user_lng=${newLng}`;
+              
+              const backendRes = await fetch(apiURL);
+              const backendData = await backendRes.json();
+              
+              // 4. 更新地圖上的停車格
+              setParkingItems(backendData); 
+
+          } else {
+              alert("找不到這個地方，請重新輸入！");
+          }
+      } catch (error) {
+          console.error("地理反查或連線後端出錯:", error);
+      }
+  };
 
   const MapEvents = () => {
     const mapInstance = useMapEvents({
@@ -80,12 +166,18 @@ function App() {
         if (!mapInstance) return;
         
         try {
+          if (!isRadiusMode && mapInstance.getZoom() < 16) {
+            console.log("🛑 [效能防禦] 級距過小，直接清空陣列，拒絕請求後端，保護記憶體。");
+            setParkingItems([]); // 一秒清空，DOM 節點瞬間蒸發
+            return; // 直接攔截，不發送 Axios 請求！
+          }
           const bounds = mapInstance.getBounds();
           const params = {
             min_lat: bounds.getSouth(),
             max_lat: bounds.getNorth(),
             min_lng: bounds.getWest(),
             max_lng: bounds.getEast(),
+            target_time: targetTime,
           };
 
           if (isRadiusMode && userLocation) {
@@ -100,6 +192,15 @@ function App() {
               if (res.data) {
                 console.log("✅ 成功獲取後端異質資料筆數:", res.data.length);
                 setParkingItems(res.data);
+                const backendTime = res.data[0].update_time || res.data[0]['update-time'];
+                
+                if (backendTime) {
+                  const formattedTime = backendTime.includes(' ') 
+                    ? backendTime.split(' ')[1].slice(0, 5) 
+                    : backendTime.slice(0, 5);
+
+                  setLastUpdateTime(formattedTime);
+                }
               }
             })
             .catch((err) => console.error("❌ API 撈取失敗:", err));
@@ -154,6 +255,7 @@ function App() {
   const handleResetToGlobal = (mapInstance) => {
     setIsRadiusMode(false);
     setUserLocation(null);
+    setSearchKeyword('');
     console.log("🌐 [自由瀏覽模式] 已解除 500m 半徑精篩，恢復全圖視野");
 
     // 🚀 讓地圖優雅地飛回大台北中心點，並把比例尺縮小到 14，展現全圖氣勢
@@ -166,68 +268,393 @@ function App() {
     <div className="app-container relative w-full h-full flex flex-col" style={{ margin: 0, padding: 0, overflow: 'hidden' }}>
       
       <div 
-        className="absolute left-1/2 -translate-x-1/2 z-[1000] flex flex-row items-center gap-3"
-        style={{ top: '15px' }} 
+        className="absolute left-1/2 -translate-x-1/2 z-[1000] flex flex-col items-center w-auto max-w-[95vw]"
+        style={{ 
+          top: '15px',
+          rowGap: '12px',
+          left: '48%',
+        }} 
       >
-        
-        {/* 🎯 按鈕 A：附近的 500m 精篩 */}
-        <button 
-          onClick={() => handleSearchNearby(map)}
-          className="font-bold py-1.5 px-6 cursor-pointer transition-all active:scale-95 text-xs tracking-wide flex items-center justify-center"
+        {/* 🔍 高質感黑白膠囊搜尋框體 */}
+        <div 
+          className="flex flex-row items-center overflow-hidden"
           style={{
-            backgroundColor: 'rgba(255,255,255,0.82)', 
-            color: '#374151',
-            border: '1px solid rgba(255, 255, 255, 0.5)',
-            borderRadius: '14px',
-            boxshadow: '0 4px 12px rgba(15,23,42,0.08)',
+            position: 'relative',
+            backgroundColor: 'rgba(255,255,255,0.9)', 
+            border: '1px solid rgba(255,255,255,0.5)',
+            backdropFilter: 'blur(12px)',
+            borderRadius: '18px',
+            boxShadow: '0 4px 12px rgba(15,23,42,0.05)',
+            padding: '0px 16px',
+            width: '720px',
+            height: '52px',
           }}
         >
-          {isRadiusMode ? (
-            <>
-              {/* 📍 已鎖定：流線定位針 Icon */}
-              <svg className="w-[1.3em] h-[1.3em]" style={{ marginRight: '6px', strokeWidth: '2.5', color: '#6B7280'}} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path>
-                <circle cx="12" cy="10" r="3"></circle>
-              </svg>
-              <span>已鎖定附近 500m 模式</span>
-            </>
-          ) : (
-            <>
-              {/* 🎯 未鎖定：科技雷達準心 Icon */}
-              <svg className="w-[1.3em] h-[1.3em]" style={{ marginRight: '6px', strokeWidth: '2.5', color: '#6B7280'}} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="12" cy="12" r="10"></circle>
-                <line x1="22" y1="12" x2="18" y2="12"></line>
-                <line x1="6" y1="12" x2="2" y2="12"></line>
-                <line x1="12" y1="6" x2="12" y2="2"></line>
-                <line x1="12" y1="22" x2="12" y2="18"></line>
-              </svg>
-              <span>搜尋我附近 (500m 半徑精篩)</span>
-            </>
-          )}
-        </button>
-
-        {/* 🌐 按鈕 B：恢復自由瀏覽 */}
-        {isRadiusMode && (
-          <button 
-            onClick={() => handleResetToGlobal(map)}
-            className="font-bold py-1.5 px-6 rounded-full cursor-pointer transition-all active:scale-95 text-xs tracking-wide animate-fade-in flex items-center justify-center"
-            style={{
-              backgroundColor: 'rgba(255,255,255,0.82)', 
-              color: '#374151',
-              border: '1px solid rgba(255, 255, 255, 0.5)',
-              borderRadius: '14px',
-              boxshadow: '0 4px 12px rgba(15,23,42,0.08)',
+          {/* 1. 行政區下拉選單 */}
+          <select
+            value={selectedDistrict}
+            onChange={(e) => setSelectedDistrict(e.target.value)}
+            className="text-xs font-bold text-gray-700 bg-transparent outline-none cursor-pointer px-3 py-1.5"
+            style={{ 
+              border: '0px solid rgba(0,0,0,0.08)',
+              borderRight: '1px solid #E5E7EB',
+              color: '#4b5563',
+              fontSize: '14px',
+              fontSize: '14px',
+              backgroundColor: 'transparent',
+              padding: '6px 28px 6px 12px',
+              outline: 'none',
+              cursor: 'pointer',
+              appearance: 'none',
+              WebkitAppearance: 'none',
+              backgroundImage: `url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%239CA3AF' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='join'><polyline points='6 9 12 15 18 9'></polyline></svg>")`,
+              backgroundRepeat: 'no-repeat',
+              backgroundPosition: 'right 8px center',
+              backgroundSize: '14px'
             }}
           >
-            {/* 🌐 自由瀏覽：極簡線性地球 Icon */}
-            <svg className="w-[1.3em] h-[1.3em]" style={{ marginRight: '6px', strokeWidth: '2.2', color: '#6B7280'}} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="12" cy="12" r="10"></circle>
-              <line x1="2" y1="12" x2="22" y2="12"></line>
-              <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+            <option value="">不限行政區</option>
+            {['中正區', '萬華區', '大同區', '中山區', '大安區', '信義區', '松山區', '內湖區', '南港區', '士林區', '北投區', '文山區'].map(dist => (
+              <option key={dist} value={dist}>{dist}</option>
+            ))}
+          </select>
+
+          {/* 2. 地標路名打字輸入框 */}
+          <input 
+            type="text"
+            placeholder="輸入路名、地標 (如: 台北101)"
+            value={searchKeyword}
+            onChange={(e) => setSearchKeyword(e.target.value)}
+            className="text-xs bg-transparent outline-none px-3 py-1.5 w-[160px] sm:w-[220px] text-gray-800 placeholder:text-[#9ca3af]"
+            onKeyDown={(e) => { if (e.key === 'Enter') handleSearch(selectedDistrict, searchKeyword); }}
+            style={{
+              color: '#1F2937',
+              opacity: '0.75',
+              border: '0px',
+              borderRight: '1px solid #E5E7EB',
+              fontWeight: '400',
+              width: '380px',
+              marginLeft: '12px',
+              paddingRight: '110px',
+            }}
+          />
+          {/* 🕒 【全新植入】搜尋框內建右下角更新時間 */}
+          <div 
+            style={{
+              position: 'absolute',
+              right: '50px',       // 🚀 剛好卡在放大鏡按鈕（最右邊）的左側
+              bottom: '5px',       // 🚀 精確鎖死在框體內部的右下角
+              fontSize: '9px',     // 精緻的微型小字
+              fontWeight: '400',
+              color: 'rgba(107,114,128,0.8)',
+              opacity: '0.8',
+              userSelect: 'none',  // 防止使用者選取文字時亮藍色，干擾視覺
+              pointerEvents: 'none',
+            }}
+          >
+            即時資料 {lastUpdateTime}更新
+          </div>
+
+          {/* 3. 膠囊小搜尋按鈕 */}
+          <button 
+            onClick={() => handleSearch(selectedDistrict, searchKeyword)}
+            className="cursor-pointer transition-all active:scale-95 flex items-center justify-center"
+            style={{
+              // 🎨 1. 【背景顏色】在這裡調！目前是極簡深藍（你可以改成橘色 #ff6600 或透明 transparent）
+              backgroundColor: 'rgba(15,23,42,0.04)', 
+              
+              // 📐 2. 【按鈕的外觀大小與形狀】
+              width: '18px',        // 按鈕寬度（鎖死正方形）
+              height: '18px',       // 按鈕高度
+              borderRadius: '18px', // 圓角（18px 與外框超配，想變正圓形可以改成 50%）
+              marginLeft: '10px',
+              border: 'none',
+              padding: '0',
+              boxShadow: '0 2px 6px rgba(79, 70, 229, 0.2)', // 淡淡的按鈕發光陰影
+            }}
+          >
+            {/* 🔍 放大鏡 Outline Icon 本體 (標準線性極簡風) */}
+            <svg 
+              className="w-5 h-5" // Tailwind 控制預設大小
+              viewBox="0 0 24 24" 
+              fill="none" 
+              strokeLinecap="round" 
+              strokeLinejoin="round"
+              style={{
+                // 🎨 3. 【Icon 顏色】在這裡調！目前是純白（若按鈕背景是透明，這裡可以改成深灰 #374151 或橘色）
+                stroke: '#9CA3AF', 
+                
+                // 📐 4. 【Icon 線條粗細】在這裡調！數字越大越粗（2.5 剛剛好，想要極細科技風可以改 1.8）
+                strokeWidth: '2.5', 
+                
+                // 📐 5. 【Icon 畫面大小】也可以在這裡精確微調
+                width: '18px',
+                height: '18px'
+              }}
+            >
+              {/* 放大鏡的正圓圈圈 */}
+              <circle cx="11" cy="11" r="8"></circle>
+              {/* 放大鏡的斜握柄 */}
+              <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
             </svg>
-            <span>恢復全圖自由瀏覽</span>
           </button>
-        )}
+        </div>
+       {/* 🚀 雙子星貨櫃：強行將「時間篩選」與「範圍切換」橫向肩並肩排開 */}
+        <div
+          className="space-time-twin-controls"
+          style={{
+            display: 'flex',
+            flexDirection: 'row',      // 🚀 核心關鍵：命令子元素由上而下改成「由左至右」橫向排列！
+            alignItems: 'flex-start',  // 讓兩個方塊的頂部對齊
+            gap: '12px',               // 🎯 精確控制：左邊時間方塊與右邊範圍滑塊之間的左右間距
+            width: 'auto',             // 寬度交給裡面的兩個 260px 自動撐開
+            boxSizing: 'border-box'
+          }}
+        >
+          
+          {/* ❶ 左側：【260px 極簡文字切換完全體】 */}
+          <div
+            className="time-filter-section"
+            style={{
+              backgroundColor: 'rgba(255,255,255,0.85)',
+              backdropFilter: 'blur(12px)',
+              WebkitBackdropFilter: 'blur(12px)',
+              borderRadius: '999px', 
+              padding: '10px',      
+              boxShadow: '0 2px 8px rgba(15,23,42,0.05)',
+              border: '1px solid rgba(99,102,241,0.12)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '5px',
+              width: '260px',
+              height: '40px',
+              boxSizing: 'border-box',
+            }}
+          >
+            {/* 📅 一體化純文字智慧點擊長條框 */}
+            <div
+              className="interactive-text-toggle-bar"
+              onClick={() => {
+                if (timeMode === 'custom') {
+                  setTimeMode('now');
+                  const now = new Date();
+                  const pad = (n) => String(n).padStart(2, '0');
+                  const formatted = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:00`;
+                  setTargetTime(formatted);
+                  if (map) map.fire('dragend');
+                } else {
+                  const inputEl = document.getElementById('ghost-time-input');
+                  if (inputEl && inputEl.showPicker) {
+                    setTimeMode('custom');
+                    inputEl.showPicker();  
+                  }
+                }
+              }}
+              style={{
+                width: '100%',
+                height: '38px', 
+                background: 'rgba(255, 255, 255, 0.6)',
+                border: '1px solid rgba(0,0,0,0.05)',
+                borderRadius: '10px',
+                padding: '0 10px', 
+                display: 'flex',
+                alignItems: 'center',
+                boxSizing: 'border-box',
+                position: 'relative',
+                cursor: 'pointer',
+                transition: 'all 0.2s ease',
+              }}
+            >
+              <input
+                id="ghost-time-input"
+                type="datetime-local"
+                value={targetTime.replace(' ', 'T').substring(0, 16)}
+                onChange={(e) => {
+                  if (!e.target.value) return;
+                  const formatted = e.target.value.replace('T', ' ') + ':00';
+                  setTargetTime(formatted);
+                  if (map) map.fire('dragend');
+                }}
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  width: '100%',
+                  height: '100%',
+                  opacity: 0,        
+                  zIndex: -1,       
+                  pointerEvents: 'none', 
+                  margin: 0,
+                  padding: 0,
+                  border: 'none',
+                  boxSizing: 'border-box'
+                }}
+              />
+
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none"
+                stroke={'#6366F1'} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
+                style={{ flexShrink: 0, marginRight: '8px', transition: 'stroke 0.2s ease' }}
+              >
+                <circle cx="12" cy="12" r="10" />
+                <polyline points="12 6 12 12 16 14" />
+              </svg>
+
+              <div
+                style={{
+                  fontSize: '13px', 
+                  fontWeight: '500',
+                  userSelect: 'none',
+                  color: '#4b5563', 
+                  transition: 'all 0.2s ease',
+                  whiteSpace: 'nowrap', 
+                }}
+              >
+                {timeMode === 'now' ? (
+                  '現在時間'
+                ) : (
+                  (() => {
+                    if (!targetTime) return '';
+                    const [datePart, timePart] = targetTime.split(' ');
+                    const shortDate = datePart.substring(2).replace(/-/g, '/'); 
+                    const [hour, min] = timePart.split(':');
+                    return `${shortDate} ${hour}:${min}`; 
+                  })()
+                )}
+              </div>
+
+              <svg
+                width="15" height="15" viewBox="0 0 24 24" fill="none"
+                stroke={'#6366F1'} 
+                strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"
+                style={{ flexShrink: 0, marginLeft: 'auto', transition: 'stroke 0.2s ease' }}
+              >
+                <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
+                <line x1="16" y1="2" x2="16" y2="6" />
+                <line x1="8" y1="2" x2="8" y2="6" />
+                <line x1="3" y1="10" x2="21" y2="10" />
+              </svg>
+            </div>
+
+            <p style={{
+              margin: '0px',
+              fontSize: '10px', 
+              color: '#818CF8',
+              alignSelf: 'flex-start',
+              paddingLeft: '2px',
+              userSelect: 'none',
+            }}>
+              ✓ 自動過濾未營業場站
+            </p>
+          </div>
+
+          {/* ❷ 右側：【260px 搜尋範圍智慧膠囊滑塊】 */}
+          <div 
+            className="search-range-section"
+            style={{
+              backgroundColor: 'rgba(79,70,229,0.08)',
+              backdropFilter: 'blur(12px)',
+              WebkitBackdropFilter: 'blur(12px)',
+              borderRadius: '999px',
+              padding: '3px',      // 🚀 讓右邊大盒子的 Padding 與左邊完全一致！
+              boxShadow: '0 4px 12px rgba(15,23,42,0.06)',
+              border: '1px solid rgba(255,255,255,0.5)',
+              display: 'flex',
+              flexDirection: 'column',
+              width: '220px',       // 規格：260px
+              height: '40px',       // 讓高度自動適應
+              boxSizing: 'border-box',
+            }}
+          >
+            {/* 內部的膠囊滑塊按鈕組 */}
+            <div
+              style={{
+                width: '100%',
+                height: '38px',     // 🚀 完美對齊左邊長條框的 38px 高度！
+                backgroundColor: 'rgba(79,70,229,0.08)', 
+                borderRadius: '10px', // 完美對齊左邊的圓角
+                padding: '3px',
+                boxSizing: 'border-box',
+                display: 'flex',
+                flexDirection: 'row',
+                userSelect: 'none',
+              }}
+            >
+              {/* 500m 模式 */}
+              <div
+                onClick={() => { if (!isRadiusMode) handleSearchNearby(map); }}
+                style={{
+                  flex: 1,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  cursor: 'pointer',
+                  transition: 'all 0.2s ease',
+                  backgroundColor: isRadiusMode ? '#FFFFFF' : 'transparent',
+                  color: isRadiusMode ? '#4338CA' : '#6B7280',
+                  fontSize: '11px',
+                  fontWeight: '600',
+                  borderRadius: '8px', // 微調內部滑塊圓角
+                  boxShadow: isRadiusMode ? '0 1px 3px rgba(15,23,42,0.08)' : 'none',
+                  gap: '4px'
+                }}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  {isRadiusMode ? (
+                    <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z M12 7a3 3 0 1 0 0 6 3 3 0 1 0 0-6z" />
+                  ) : (
+                    <>
+                      <circle cx="12" cy="12" r="10" />
+                      <line x1="22" y1="12" x2="2" y2="12" />
+                      <line x1="12" y1="6" x2="12" y2="2" />
+                      <line x1="12" y1="22" x2="12" y2="18" />
+                    </>
+                  )}
+                </svg>
+                <span>500m模式</span>
+              </div>
+
+              {/* 自由瀏覽 */}
+              <div
+                onClick={() => { if (isRadiusMode) handleResetToGlobal(map); }}
+                style={{
+                  flex: 1,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  cursor: 'pointer',
+                  transition: 'all 0.2s ease',
+                  backgroundColor: !isRadiusMode ? '#FFFFFF' : 'transparent',
+                  color: !isRadiusMode ? '#4338CA' : '#6B7280',
+                  fontSize: '11px',
+                  fontWeight: '600',
+                  borderRadius: '8px',
+                  boxShadow: !isRadiusMode ? '0 1px 3px rgba(15,23,42,0.08)' : 'none',
+                  gap: '4px'
+                }}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="10" />
+                  <line x1="2" y1="12" x2="22" y2="12" />
+                  <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+                </svg>
+                <span>自由瀏覽</span>
+              </div>
+            </div>
+
+            {/* 🚀 完美對稱：右半邊盒子底部也塞一行隱形或辅助小字，確保兩邊總體高度完美切齊！ */}
+            <p style={{
+              margin: '0px',
+              fontSize: '10px', 
+              color: '#10B981', // 莫蘭迪綠色
+              alignSelf: 'flex-start',
+              paddingLeft: '2px',
+              userSelect: 'none',
+            }}>
+              ✓ 當前地圖圖資已同步
+            </p>
+          </div>
+
+        </div>
       </div>
       <div className="absolute bottom-10 right-5 z-[1000] flex flex-col gap-3">
         
@@ -236,14 +663,14 @@ function App() {
           onClick={() => map.zoomIn()} // 🚀 呼叫 Leaflet 的內建放大功能
           className="font-bold text-slate-800 border-slate-200/80 cursor-pointer transition-all active:scale-90 flex items-center justify-center text-lg"
           style={{
-            width: '44px !important',
-            height: '44px !important',
-            minHeight: '44px',
-            minWidth: '44px',
-            backgroundColor: 'rgba(255,255,255,0.88)',
+            width: '40px !important',
+            height: '40px !important',
+            minHeight: '40px',
+            minWidth: '40px',
+            backgroundColor: 'rgba(255,255,255,0.86)',
             color: '#4B5563',
             border: '0px solid #4B5563',
-            boxShadow: '0 4px 12px rgba(15, 23, 42, 0.08)',
+            boxShadow: '0 4px 12px rgba(15, 23, 42, 0.06)',
             borderRadius: '14px 14px 0 0', // 🎯 上圓角設計，與下方縮小按鈕形成視覺連結
           }}
         >
@@ -255,14 +682,14 @@ function App() {
           onClick={() => map.zoomOut()} // 🚀 呼叫 Leaflet 的內建縮小功能
           className="text-slate-800 border-slate-200/80 cursor-pointer transition-all active:scale-90 flex items-center justify-center text-lg"
           style={{
-            width: '44px !important',
-            height: '44px !important',
-            minWidth: '44px',
-            minHeight: '44px',
-            backgroundColor: 'rgba(255,255,255,0.88)',
+            width: '40px !important',
+            height: '40px !important',
+            minWidth: '40px',
+            minHeight: '40px',
+            backgroundColor: 'rgba(255,255,255,0.86)',
             color: '#4B5563',
             border: '0px solid #4B5563',
-            boxShadow: '0 4px 12px rgba(15, 23, 42, 0.08)',
+            boxShadow: '0 4px 12px rgba(15, 23, 42, 0.06)',
             borderRadius: '0 0 14px 14px',
           }}
         >
@@ -275,8 +702,10 @@ function App() {
         center={[25.055, 121.523]} 
         zoom={15}
         zoomControl={false} 
+        attributionControl={false}
         style={{ width: '100%', height: '100%' }}
         ref={setMap}
+        preferCanvas={true}
         whenReady={(mapInstance) => {
           setTimeout(() => {
             mapInstance.target.invalidateSize();
@@ -301,6 +730,7 @@ function App() {
                 color: '#FFFFFF',
                 weight: 2,
               }}
+              renderer={L.svg()}
             />
 
             <Circle
@@ -308,133 +738,87 @@ function App() {
               radius={500} // 📐 嚴格對齊後端 ST_Distance_Sphere 的 500 公尺！
               pathOptions={{
                 fillColor: '#6366F1',   // Tailwind Blue 500
-                fillOpacity: 0.08,     // 🌌 極致輕薄的半透明科技底色，絕對不遮擋馬路和圖標
+                fillOpacity: 0.05,     // 🌌 極致輕薄的半透明科技底色，絕對不遮擋馬路和圖標
                 color: '#6366F1',
-                opacity: '0.35~0.4',
+                opacity: '0.5',
                 weight: 1,
                 dashArray: '18, 12',     // ⚡ 讓圓形外框變虛線圈，視覺質感直接飛天！
               }}
-              interactive={false}      // 🚀 關鍵：設為 false 讓滑鼠點擊可以完全「穿透」光圈，絕對不卡住底下的停車場 Popup！
+              interactive={false}
+              renderer={L.svg()}
             />
           </React.Fragment>
         )}
         <div 
           className="absolute bottom-24 right-5 z-[1000] flex flex-col gap-2.5 p-3 rounded-xl border-slate-200/80 tracking-wide animate-fade-in"
           style={{
-            width: '180px',
-            height: '180px',
+            width: '150px',
+            height: '120px',
             backgroundColor: 'rgba(255,255,255,0.82)',
-            boxShadow: '0 4px 12px rgba(15, 23, 42, 0.08)',
+            boxShadow: '0 4px 10px rgba(15,23,42,0.06)',
             border: '1px solid #FFFFFF30',
             borderRadius: '14px',
             userSelect: 'none',
-            bottom: '24px',
-            right: '5px',
+            bottom: '30px',
+            right: '20px',
+            padding: '10px 12spx',
           }}
         >
-          {/* 卡片標題 */}
-          <div className="text-[16px] text-slate-400 uppercase tracking-widest mb-20" style={{ color: '#4B5563', marginLeft: '60px', marginBottom: '10px' }}>
-            圖例說明
-          </div>
 
           {/* ❶ 停車場 */}
-          <div className="flex items-center gap-7 text-[14px] font-bold" style={{ color: '#4B5563' }}>
+          <div className="flex items-center gap-8 text-[14px] font-bold" style={{ color: '#6B7280' }}>
             <div className="flex items-center justify-center w-6 h-4">
               {/* 🟢 絕對不跑版正圓點：代表地圖上的點狀水滴 */}
-              <div style={{ width: '20px', height: '20px', backgroundColor: '#4F46E5', borderRadius: '50% 50% 50% 15%', transform: 'rotate(-45deg)', marginLeft: '13.5px', marginBottom: '10px' }} />
+              <div style={{ width: '20px', height: '20px', backgroundColor: '#3730A3', borderRadius: '50% 50% 50% 15%', transform: 'rotate(-45deg)', marginTop: '8px', marginLeft: '14px', marginBottom: '10px' }} />
             </div>
-            <span style={{ fontSize: '16px', marginLeft: '14.5px', marginBottom: '10px' }}>停車場</span>
+            <span style={{ fontSize: '11px', marginLeft: '14.5px', marginBottom: '10px' , marginTop: '12px'}}>停車場</span>
           </div>
 
           {/* ❸ 黃線 */}
-          <div className="flex items-center gap-3 text-[14px] font-bold" style={{ color: '#4B5563' }}>
+          <div className="flex items-center gap-8 text-[14px] font-bold" style={{ color: '#6B7280' }}>
             <div className="flex items-center justify-center w-6 h-4">
               {/* 🟡 鮮明交通黃線 */}
-              <div style={{ width: '24px', height: '4px', backgroundColor: '#C9A227', borderRadius: '2px', marginLeft: '12px', marginBottom: '10px' }} />
+              <div style={{ width: '18px', height: '4px', backgroundColor: '#C9A227', borderRadius: '2px', marginLeft: '15px', marginBottom: '10px' }} />
             </div>
-            <span style={{ fontSize: '16px', marginLeft: '12px', marginBottom: '10px' }}>黃線 (時段臨停)</span>
+            <span style={{ fontSize: '11px', marginLeft: '12px', marginBottom: '10px' }}>黃線 (時段臨停)</span>
           </div>
 
           {/* ❹ 路邊可停 */}
-          <div className="flex items-center gap-3 text-[14px] font-bold" style={{ color: '#4B5563' }}>
+          <div className="flex items-center gap-8 text-[14px] font-bold" style={{ color: '#6B7280' }}>
             <div className="flex items-center justify-center w-6 h-4">
               {/* 🟢 自由瀏覽翠綠線 */}
-              <div style={{ width: '24px', height: '4px', backgroundColor: '#6B9E78', borderRadius: '2px', marginLeft: '12px', marginBottom: '10px' }} />
+              <div style={{ width: '18px', height: '4px', backgroundColor: '#6B9E78', borderRadius: '2px', marginLeft: '15px', marginBottom: '10px' }} />
             </div>
-            <span style={{ fontSize: '16px', marginLeft: '12px', marginBottom: '10px' }}>路邊可停</span>
+            <span style={{ fontSize: '11px', marginLeft: '12px', marginBottom: '10px' }}>路邊可停</span>
           </div>
 
           {/* ❺ 已滿 */}
-          <div className="flex items-center gap-3 text-[14px] font-bold" style={{ color: '#4B5563' }}>
+          <div className="flex items-center gap-8 text-[14px] font-bold" style={{ color: '#6B7280' }}>
             <div className="flex items-center justify-center w-6 h-4">
               {/* ⚪ 飽和莫蘭迪灰線 */}
-              <div style={{ width: '24px', height: '4px', backgroundColor: '#C96B5C', borderRadius: '2px', marginLeft: '12px', marginBottom: '10px' }} />
+              <div style={{ width: '18px', height: '4px', backgroundColor: '#C96B5C', borderRadius: '2px', marginLeft: '15px', marginBottom: '10px' }} />
             </div>
-            <span style={{ fontSize: '16px', marginLeft: '12px', marginBottom: '10px' }}>路邊已滿</span>
+            <span style={{ fontSize: '11px', marginLeft: '12px', marginBottom: '10px' }}>路邊已滿</span>
           </div>
         </div>
 
         {parkingItems.map((item, idx) => {
           if (!item || !item.type) return null;
+          const currentZoom = map ? map.getZoom() : 15; // 抓不到時預設 15
+          if (!isRadiusMode && currentZoom < 16) {
+            return null; // 物理屏蔽，只留地圖本人
+          }
           
           if (item.type === 'lot') {
             if (!item.latitude || !item.longitude) return null;
             const lat = parseFloat(item.latitude);
             const lng = parseFloat(item.longitude);
-            if (isNaN(lat) || isNaN(lng)) return null;
-
-            const getParkingIcon = (avaCar, carSpace) => {
-              const isFull = avaCar <= 0 || avaCar === null || avaCar === undefined;
-              
-              const bgColor = isFull ? '#9CA3AF' : '#4338CA'; 
-              const wdColor = isFull ? '#F3F4F6' : '#F8FAFC';
-              const opacity = isFull ? 0.8 : 1;
-              const displayText = isFull ? '滿' : avaCar;
-              const fontSize = isFull ? '11px' : '13px'; // 「滿」字稍微縮小一點點比較精緻
-
-              return L.divIcon({
-                className: 'my-premium-p-icon', 
-                html: `
-                  <div style="
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    width: 44px;
-                    height: 44px;
-                    background-color: ${bgColor} !important; /* 🎯 動態背景色 */
-                    border: 1px solid #FFFFFF30 !important; 
-                    border-radius: 50% 50% 50% 10%; transform: rotate(-45deg);
-                    box-shadow: 0 2px 6px rgba(15,23,42,0.12); 
-                    cursor: pointer;
-                    margin: 0;
-                    padding: 0;
-                    box-sizing: border-box;
-                  ">
-                    <span style="
-                      color: ${wdColor} !important;           
-                      font-family: sans-serif !important;
-                      font-weight: 500 !important;
-                      font-style: normal !important;
-                      transform: rotate(45deg) !important;
-                      font-size: 10px !important;
-                      line-height: 1 !important;
-                      user-select: none;
-                      margin: 0;
-                      padding: 0;
-                    ">${displayText}
-                    </span>
-                  </div>
-                `,
-                iconSize: [26, 26],   
-                iconAnchor: [13, 13], 
-                popupAnchor: [0, -13],
-              });
-            };    
+            if (isNaN(lat) || isNaN(lng)) return null;   
 
             return (
               <Marker 
                 position={[lat, lng]} 
-                icon={getParkingIcon(item.ava_car, item.car_space)}
+                icon={createOptimizedParkingIcon(item.ava_car, item.current_active_rate)}
                 key={`lot-p-style-secure-${item.lot_id || item.id}`} // 🔒 身份鎖死，絕不白屏
               >
                 <Popup
@@ -471,67 +855,68 @@ function App() {
                     </p>
 
                     {/* 📊 區塊分隔線與剩餘車位列表 */}
-                    <div className="flex flex-col gap-1.5 pt-2.5 border-t border-slate-100">
-                      
-                      {/* 🚗 一般車位 */}
-                      <div className="flex items-center justify-between text-xs">
-                        <span className="text-gray-500 flex items-center gap-1.5">
-                          {/* 線性小汽車 Icon */}
-                          <svg className="w-[1.2em] h-[1.2em] flex-shrink-0" style={{ color: '#9ca3af', marginRight: '2px'}} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="M19 17h2c.6 0 1-.4 1-1v-3c0-.9-.7-1.7-1.5-1.9C18.7 10.6 16 10 16 10s-1.3-1.4-2.2-2.3c-.5-.4-1.1-.7-1.8-.7H5c-.6 0-1.1.4-1.4.9l-1.4 2.9A3.7 3.7 0 0 0 2 12v4c0 .6.4 1 1 1h2" />
-                            <circle cx="7" cy="17" r="2" /><path d="M9 17h6" /><circle cx="17" cy="17" r="2" />
-                          </svg>
-                          一般剩餘
-                        </span>
-                        <span className="font-bold text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded text-[11px]">
-                          {item.ava_car ?? '0'} <span className="text-[10px] text-blue-400 font-normal">/{item.car_space ?? 0}</span>
-                        </span>
-                      </div>
-
-                      {/* ♿ 身障車位 */}
-                      <div className="flex items-center justify-between text-xs">
-                        <span className="text-gray-500 flex items-center gap-1.5">
-                          {/* 線性無障礙 Icon */}
-                          <svg className="w-[1.2em] h-[1.2em] flex-shrink-0" style={{ color: '#9ca3af', marginRight: '2px'}} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                            <circle cx="12" cy="4" r="1.5" />
-                            <path d="M9 8h4.5l1.5 5h3.5" />
-                            <path d="M16 16.5A4.5 4.5 0 1 1 11.5 12" />
-                          </svg>
-                          身障剩餘
-                        </span>
-                        <span className="font-bold text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded text-[11px]">
-                          {item.ava_handicap ?? '0'} <span className="text-[10px] text-blue-400 font-normal">/{item.handicap_space ?? 0}</span>
-                        </span>
-                      </div>
-
-                      {/* 🤰 孕婦車位 */}
-                      <div className="flex items-center justify-between text-sm">
-                        <span className="text-gray-600 flex items-center gap-1">
-                          
-                          {/* 🚀 關鍵改動：換上極簡流線心形（母子意象） */}
-                          <svg 
-                            className="w-[1.2em] h-[1.2em] flex-shrink-0" 
-                            style={{ color: '#9ca3af', marginBottom: '-0.3em', marginRight: '2px'}} // 莫蘭迪灰维持一致
-                            xmlns="http://www.w3.org/2000/svg" 
-                            viewBox="0 0 24 24" 
-                            fill="none" 
-                            stroke="currentColor" 
-                            strokeWidth="2.5" 
-                            strokeLinecap="round" 
-                            strokeLinejoin="round"
-                          >
-                            {/* 🚀 這個公式畫出一個大心形包著一個小心形，象徵母嬰流線，變小也絕對清晰 */}
-                            <path d="M21 8a6 6 0 0 1-12 0 6 6 0 0 1 12 0Z" />
-                            <path d="M12.5 12.5a3 3 0 0 1-6 0 3 3 0 0 1 6 0Z" />
-                          </svg>
-                          孕婦剩餘：
-                        </span>
-                        <span className="font-bold text-pink-500 bg-pink-50 px-1.5 py-0.5 rounded text-xs">
-                          {item.ava_pregnancy ?? '0'} <span className="text-gray-400 font-normal">/{item.pregnancy_space ?? 0}</span>
-                        </span>
-                      </div>
-
+                  <div style={{ borderTop: '1px solid #f1f5f9', marginTop: '8px', marginBottom: '10px', width: '100%' }} />
+                  <div className="flex flex-col gap-2">
+                    
+                    {/* 🚗 一般車位 */}
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-gray-500 flex items-center gap-1.5">
+                        {/* 線性小汽車 Icon */}
+                        <svg className="w-[1.2em] h-[1.2em] flex-shrink-0" style={{ color: '#9ca3af', marginRight: '2px'}} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M19 17h2c.6 0 1-.4 1-1v-3c0-.9-.7-1.7-1.5-1.9C18.7 10.6 16 10 16 10s-1.3-1.4-2.2-2.3c-.5-.4-1.1-.7-1.8-.7H5c-.6 0-1.1.4-1.4.9l-1.4 2.9A3.7 3.7 0 0 0 2 12v4c0 .6.4 1 1 1h2" />
+                          <circle cx="7" cy="17" r="2" /><path d="M9 17h6" /><circle cx="17" cy="17" r="2" />
+                        </svg>
+                        一般剩餘
+                      </span>
+                      <span className="font-bold text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded text-[11px]">
+                        {item.ava_car ?? '0'} <span className="text-[11px] text-blue-400 font-normal" >/ {item.car_space ?? 0}</span>
+                      </span>
                     </div>
+
+                    {/* ♿ 身障車位 */}
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-gray-500 flex items-center gap-1.5">
+                        {/* 線性無障礙 Icon */}
+                        <svg className="w-[1.2em] h-[1.2em] flex-shrink-0" style={{ color: '#9ca3af', marginRight: '2px'}} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                          <circle cx="12" cy="4" r="1.5" />
+                          <path d="M9 8h4.5l1.5 5h3.5" />
+                          <path d="M16 16.5A4.5 4.5 0 1 1 11.5 12" />
+                        </svg>
+                        身障剩餘
+                      </span>
+                      <span className="font-bold text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded text-[11px]">
+                        {item.ava_handicap ?? '0'} <span className="text-[11px] text-blue-400 font-normal">/ {item.handicap_space ?? 0}</span>
+                      </span>
+                    </div>
+
+                    {/* 🤰 孕婦車位 */}
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-gray-600 flex items-center gap-1">
+                        
+                        {/* 🚀 關鍵改動：換上極簡流線心形（母子意象） */}
+                        <svg 
+                          className="w-[1.2em] h-[1.2em] flex-shrink-0" 
+                          style={{ color: '#9ca3af', marginBottom: '-0.3em', marginRight: '2px'}} // 莫蘭迪灰维持一致
+                          xmlns="http://www.w3.org/2000/svg" 
+                          viewBox="0 0 24 24" 
+                          fill="none" 
+                          stroke="currentColor" 
+                          strokeWidth="2.5" 
+                          strokeLinecap="round" 
+                          strokeLinejoin="round"
+                        >
+                          {/* 🚀 這個公式畫出一個大心形包著一個小心形，象徵母嬰流線，變小也絕對清晰 */}
+                          <path d="M21 8a6 6 0 0 1-12 0 6 6 0 0 1 12 0Z" />
+                          <path d="M12.5 12.5a3 3 0 0 1-6 0 3 3 0 0 1 6 0Z" />
+                        </svg>
+                        孕婦剩餘
+                      </span>
+                      <span className="font-bold text-pink-500 bg-pink-50 px-1.5 py-0.5 rounded text-[11px]">
+                        {item.ava_pregnancy ?? '0'} <span className="text-[11px] text-gray-400 font-normal">/ {item.pregnancy_space ?? 0}</span>
+                      </span>
+                    </div>
+
+                  </div>
 
                     {/* 🔗 4. 查看詳細收費按鈕（完美整合你的 onClick 防禦邏輯 + iOS 微感灰） */}
                     <button
@@ -690,21 +1075,21 @@ function App() {
             );
           }
 
-          // 🟡 情境 C：黃線管制 (yellow_line)
+          // 🟡 情境 C：黃線管制 (yellow_line) - 物理通水管版
           if (item.type === 'yellow_line' && item.geometry_wkt) {
+            console.log(`📡 [黃線原始數據] ID: ${item.yl_id}, WKT:`, item.geometry_wkt);
             const coords = parseWKTToLatLng(item.geometry_wkt);
-            if (!coords || coords.length < 2) return null;
+            console.log(`🎯 [黃線解析座標] ID: ${item.yl_id}, Coords 筆數: ${coords ? coords.length : 0}, 內容:`, coords);
+            if (!coords || coords.length === 0) return null; // 隄防解析失敗
 
             return (
               <FeatureGroup key={`yl-secure-group-${item.yl_id || item.id}`}>
-                {/* 🛡️ 第一層：隱形觸控盾牌（寬度 25px，完全透明，負責抓滑鼠點擊） */}
+                {/* 🛡️ 第一層：隱形觸控盾牌（寬度 25px，直接用大寫 Prop 控制，完全透明負責抓點擊） */}
                 <Polyline
                   positions={coords}
-                  pathOptions={{
-                    color: '#C9A227',
-                    weight: 25,
-                    opacity: 0,
-                  }}
+                  color="#C9A227"
+                  weight={25}
+                  opacity={0}
                 >
                   <Popup>
                     <div className="p-1 text-slate-800 font-sans min-w-[200px]">
@@ -728,17 +1113,15 @@ function App() {
                   </Popup>
                 </Polyline>
 
-                {/* 🎨 第二層：視覺實線外框（寬度 2px，純視覺，滑鼠直接穿透） */}
+                {/* 🎨 第二層：視覺實線（寬度 3px 稍微加粗更顯眼，滑鼠穿透） */}
                 <Polyline
                   positions={coords}
-                  pathOptions={{
-                    color: '#F1C40F',
-                    weight: 1.5,
-                    opacity: 0.6,
-                    lineCap: 'butt',
-                    lineJoin: 'round',
-                  }}
-                  interactive={false} // 🚀 關鍵：讓滑鼠完全穿透，點擊會直接穿過去觸發第一層的 25px 盾牌
+                  color="#F1C40F"
+                  weight={3.5}
+                  opacity={0.8}
+                  lineCap="round"
+                  lineJoin="round"
+                  interactive={false} 
                   noClip={true}
                 />
               </FeatureGroup>
@@ -777,7 +1160,7 @@ function App() {
               borderRadius: '16px',
               border: '1px solid #e5e7eb',
               color: '#000000',
-              padding: '24px',
+              padding: '0px 24px 24px 24px',
               boxSizing: 'border-box',
               cursor: 'default'
             }}
@@ -792,7 +1175,7 @@ function App() {
                   {/* 🅿️ 這是全新的純線性高質感 🅿️ Icon */}
                   <svg 
                     className="w-[1em] h-[1em] flex-shrink-0 inline-block align-text-bottom" // 🚀 1. 鎖定文字比例，並設定行內對齊
-                    style={{ color: '#4F46E5', marginBottom: '0.00em' }} // 🚀 2. 微調下邊距，確保它跟中文字的水平線完美貼齊
+                    style={{ color: '#4F46E5' }} // 🚀 2. 微調下邊距，確保它跟中文字的水平線完美貼齊
                     xmlns="http://www.w3.org/2000/svg" 
                     viewBox="0 0 24 24" 
                     fill="none" 
@@ -812,12 +1195,12 @@ function App() {
                 {activeFeeItem.addr && (
                   <p 
                     className="text-xs m-0 mb-1 flex items-center gap-2.5" 
-                    style={{ color: '#6b7280', paddingLeft: '0px' }} // 🚀 微調左邊距，讓它跟上面的標題完美對齊
+                    style={{ color: '#4B5563', paddingLeft: '0px' }} // 🚀 微調左邊距，讓它跟上面的標題完美對齊
                   >
                     {/* 🔲 這是全新的地址專用：微型線性圓角方框 📍 Icon */}
                     <svg 
                       className="w-[1.1em] h-[1.1em] flex-shrink-0 inline-block align-text-bottom" 
-                      style={{ color: '#9ca3af', marginBottom: '-0.03em' }} // 質感低調灰
+                      style={{ color: '#4B5563', marginBottom: '0px' }} // 質感低調灰
                       xmlns="http://www.w3.org/2000/svg" 
                       viewBox="0 0 24 24" 
                       fill="none" 
@@ -839,6 +1222,13 @@ function App() {
               <button 
                 onClick={() => setActiveFeeItem(null)}
                 className="text-gray-400 hover:text-gray-600 cursor-pointer text-lg font-light p-1 leading-none"
+                style={{ 
+                  marginTop: '20px',     // 歸零原本的微調，讓瀏覽器自動計算
+                  padding: '4px',       // 稍微加大點擊判定區，讓滑鼠更好點
+                  display: 'flex',
+                  borderRadius: '8px',
+                  border: '0.1px solid #c9c9c9'
+                }}
               >
                 ✕
               </button>
@@ -849,7 +1239,7 @@ function App() {
               {/* 🕒 全新極簡線性時鐘 Icon */}
               <svg 
                 className="w-[1.1em] h-[1.1em] flex-shrink-0 inline-block align-text-bottom" 
-                style={{ color: '#9ca3af', marginBottom: '-0.01em' }} 
+                style={{ color: '#4B5563', marginBottom: '20px' }} 
                 xmlns="http://www.w3.org/2000/svg" 
                 viewBox="0 0 24 24" 
                 fill="none" 
@@ -863,7 +1253,7 @@ function App() {
               </svg>
 
               {/* 營業時間文字 */}
-              <span>營運時間：{activeFeeItem.tw_open_info || '24 小時營業'}</span>
+              <span style={{ color: '#4B5563', marginBottom: '20px' }} >營運時間：{activeFeeItem.tw_open_info || '24 小時營業'}</span>
             </p>
             
             {/* 3. 核心內容區 */}
@@ -873,7 +1263,7 @@ function App() {
                   {/* 🪙 全新極簡線性錢幣 Icon */}
                   <svg 
                     className="w-[1.1em] h-[1.1em] flex-shrink-0 inline-block align-text-bottom" 
-                    style={{ color: '#9ca3af', marginBottom: '0.00em' }} // 低調灰色維持一致
+                    style={{ color: '#4B5563', marginBottom: '20px' }} // 低調灰色維持一致
                     xmlns="http://www.w3.org/2000/svg" 
                     viewBox="0 0 24 24" 
                     fill="none" 
@@ -893,19 +1283,19 @@ function App() {
                     <path d="M9 10v4M7 12h4" />
                   </svg>
                   {/* 收費標準標題文字 */}
-                  <span>收費標準</span>
+                  <span style={{ color: '#4B5563', marginBottom: '20px' }}>收費標準</span>
                 </div>                
                 {/* 核心費率文字框 */}
                 <div 
                   className="font-bold rounded text-xs leading-relaxed whitespace-pre-wrap"
-                  style={{ backgroundColor: '#f3f4f6', color: '#495a74', border: '1px solid #eceff3', padding: '10px', borderRadius: '8px' }}
+                  style={{ backgroundColor: '#f3f4f6', color: '#4b5569', border: '1px solid #eceff3', padding: '10px', borderRadius: '8px' }}
                 >
                   {activeFeeItem.charge_fee || activeFeeItem.charge || '每小時 40 元。當日最高收費 200 元。'}
                 </div>
               </div>
 
               {/* 更新時間小字 */}
-              <div className="text-[10px] pt-1 flex items-center justify-between" style={{ color: '#9ca3af' }}>
+              <div className="text-[10px] pt-1 flex items-center justify-between" style={{ color: '#6b7280', fontSize: '11px', marginBottom: '8px' }}>
                 {/* 🚀 讓 Icon 和文字用 flex 水平置中，並用 gap-1 控制它們的橫向間距 */}
                 <span className="flex items-center gap-2">
                   
@@ -913,7 +1303,7 @@ function App() {
                   <svg 
                     className="w-[1.2em] h-[1.2em] flex-shrink-0" 
                     style={{ 
-                      color: '#9ca3af', 
+                      color: '#6b7280', 
                       // 🎯 垂直位置微調彈簧：
                       // 如果覺得 Icon 太高就調小（如 0em 或 -0.01em）
                       // 如果覺得 Icon 太低就調大（如 0.05em 或 0.08em）
@@ -956,5 +1346,78 @@ function App() {
     </div>
   );
 }
+const createOptimizedParkingIcon = (avaCar, currentRateItem) => {
+  const isFull = avaCar <= 0 || avaCar === null || avaCar === undefined || avaCar === '';
+  
+  const bgColor = isFull ? '#9CA3AF' : '#3730A3'; 
+  const wdColor = isFull ? '#F3F4F6' : '#F8FAFC';
+  let rateText = '-';
+  if (currentRateItem) {
+    if (currentRateItem.hourly_rate !== null && currentRateItem.hourly_rate !== undefined) {
+      rateText = `$${currentRateItem.hourly_rate}`;
+    } else if (currentRateItem.per_time_rate !== null && currentRateItem.per_time_rate !== undefined) {
+      rateText = `$${currentRateItem.per_time_rate}`;
+    }
+  }
+  const spaceText = isFull ? '滿' : avaCar;
 
+  return L.divIcon({
+    className: 'my-premium-p-icon', 
+    html: `
+      <div style="
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 52px;
+        height: 52px;
+        background-color: ${bgColor} !important;
+        border: 1px solid #FFFFFF30 !important; 
+        border-radius: 50% 50% 50% 10%; transform: rotate(-45deg);
+        box-shadow: 0 2px 6px rgba(15,23,42,0.12); 
+        cursor: pointer;
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      ">
+        <div style="
+          transform: rotate(45deg);
+          display: flex;
+          flex-direction: column;
+          width: 100%;
+          height: 100%;
+          align-items: center;
+          justify-content: center;
+        ">
+          <div style="
+            font-family: sans-serif !important;
+            font-weight: 700 !important;
+            font-size: 11px !important;
+            color: ${wdColor} !important;
+            line-height: 1.2 !important;
+            margin-top: 2px;
+          ">
+           ${rateText}
+          </div>
+          <div style="
+            width: 70%;
+            border-top: 1px solid rgba(255, 255, 255, 0.4);
+            margin: 2px 0;
+          "></div>
+          <div style="
+            font-family: sans-serif !important;
+            font-weight: 500 !important;
+            font-size: 10px !important;
+            color: ${isFull ? '#F3F4F6' : '#A5B4FC'} !important; /* 滿車顯示淡灰，有車位顯示科技亮藍 */
+            line-height: 1.2 !important;
+            margin-bottom: 2px;
+          ">
+            ${spaceText}
+          </div>
+      </div>
+    `,
+    iconSize: [32, 32],   
+    iconAnchor: [16, 16], 
+    popupAnchor: [0, -16],
+  });
+};
 export default App;
